@@ -8,18 +8,48 @@ To run:
     pip install -r requirements.txt
     python desktop_app.py
 
-To build a Windows .exe:
+To build a Windows .exe (with the app icon bundled):
     pip install pyinstaller
-    pyinstaller --noconsole --onefile --name "RO_Code_Merger" desktop_app.py
+    pyinstaller --noconsole --onefile --icon=icon.ico ^
+        --add-data "icon.ico;." --name "RO_Code_Merger" desktop_app.py
 """
 
 import os
+import sys
+import ctypes
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
 import pandas as pd
+
+
+# ---------------------------------------------------------------------------
+# Icon / taskbar identity helpers
+# ---------------------------------------------------------------------------
+def resource_path(relative_path: str) -> str:
+    """
+    Resolves a bundled resource's path, both when running as a normal
+    Python script and when running as a PyInstaller --onefile .exe
+    (where files are unpacked into a temporary _MEIPASS folder).
+    """
+    base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
+
+
+def set_windows_app_id(app_id: str = "Relcon.ROCodeMerger.1"):
+    """
+    Without this, Windows groups the app under the generic Python icon
+    when it is pinned to the taskbar. Setting a unique AppUserModelID
+    tells Windows this is its own distinct application.
+    """
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+        except Exception:
+            pass
+
 
 # ---------------------------------------------------------------------------
 # CONFIG — business logic
@@ -190,6 +220,7 @@ class ROMergerApp(ctk.CTk):
         self.geometry("1280x760")
         self.minsize(1080, 640)
         self.configure(fg_color=COLOR["bg"])
+        self._set_app_icon()
 
         self.source_df = None
         self.merged_df = None
@@ -201,6 +232,22 @@ class ROMergerApp(ctk.CTk):
         self._build_sidebar()
         self._build_main_area()
         self._set_step("upload")
+
+    def _set_app_icon(self):
+        """Sets the window/taskbar icon (icon.ico) if it's available."""
+        try:
+            ico_path = resource_path("icon.ico")
+            if os.path.exists(ico_path):
+                self.iconbitmap(ico_path)
+                # Some Windows taskbar/pin scenarios also read iconphoto;
+                # setting both keeps the icon consistent everywhere.
+                icon_img = tk.PhotoImage(file=resource_path("icon.png")) \
+                    if os.path.exists(resource_path("icon.png")) else None
+                if icon_img is not None:
+                    self.iconphoto(True, icon_img)
+                    self._icon_ref = icon_img  # prevent garbage collection
+        except Exception:
+            pass
 
     # ------------------------------------------------------------ SIDEBAR
     def _build_sidebar(self):
@@ -546,5 +593,6 @@ class ROMergerApp(ctk.CTk):
 
 
 if __name__ == "__main__":
+    set_windows_app_id()
     app = ROMergerApp()
     app.mainloop()
