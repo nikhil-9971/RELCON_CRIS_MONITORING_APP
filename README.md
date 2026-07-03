@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # RO Code Report Merger — Desktop App
 
 Duplicate RO Code rows ko ek clean row me merge karta hai — Engineer ke liye ready report.
@@ -51,3 +52,7 @@ automatically Windows .exe bana deta hai.
 ## Note
 - `.exe` build hamesha usi OS par karo jis OS ke liye use chahiye (Windows machine → Windows .exe, Mac → Mac app).
 - Icon add karna ho to: `pyinstaller --noconsole --onefile --icon=your_icon.ico --name "RO_Code_Merger" desktop_app.py`
+=======
+# RELCON_CRIS_MONITORING_APP
+APP
+>>>>>>> 87104aea94983c88428d72aa9c1775c3d4498927
