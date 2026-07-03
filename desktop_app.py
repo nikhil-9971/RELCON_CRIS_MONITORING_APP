@@ -1,14 +1,14 @@
 """
 RO Code Report Merger — Desktop App
 ------------------------------------
-Ek Excel sheet upload karo, jis RO Code ke multiple rows honge unhe
-automatically ek row me merge kar deta hai.
+Upload an Excel sheet, and any RO Code with multiple rows will
+automatically be merged into a single row.
 
-Run karne ke liye:
+To run:
     pip install -r requirements.txt
     python desktop_app.py
 
-.exe banane ke liye (Windows par):
+To build a Windows .exe:
     pip install pyinstaller
     pyinstaller --noconsole --onefile --name "RO_Code_Merger" desktop_app.py
 """
@@ -54,9 +54,9 @@ FONT_BUTTON = ("Segoe UI", 12, "bold")
 
 
 def merge_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Duplicate RO Code rows ko ek row me merge karta hai."""
+    """Merges duplicate RO Code rows into a single row."""
     if GROUP_KEY not in df.columns:
-        raise ValueError(f"'{GROUP_KEY}' column sheet me nahi mila.")
+        raise ValueError(f"'{GROUP_KEY}' column not found in the sheet.")
 
     same_cols = [c for c in SAME_COLUMNS if c in df.columns and c != GROUP_KEY]
     diff_cols = [c for c in DIFFERENT_COLUMNS if c in df.columns]
@@ -112,7 +112,7 @@ class ROMergerApp(ctk.CTk):
 
         subtitle = ctk.CTkLabel(
             header,
-            text="Duplicate RO Code rows ko ek clean row me merge karo — engineer ke liye ready report",
+            text="Merge duplicate RO Code rows into a single clean row — ready report for engineers",
             font=FONT_SUBTITLE, text_color="#D6EAF8",
         )
         subtitle.pack(anchor="w", padx=30, pady=(0, 12))
@@ -132,13 +132,13 @@ class ROMergerApp(ctk.CTk):
         self.upload_btn.grid(row=0, column=0, padx=(0, 15))
 
         self.file_label = ctk.CTkLabel(
-            inner, text="Koi file select nahi ki gayi",
+            inner, text="No file selected",
             font=FONT_BODY, text_color="#555",
         )
         self.file_label.grid(row=0, column=1, sticky="w")
 
         self.merge_btn = ctk.CTkButton(
-            inner, text="🔀  Merge Karo", font=FONT_BUTTON,
+            inner, text="🔀  Merge", font=FONT_BUTTON,
             fg_color=SUCCESS, hover_color="#145A32", height=42, width=160,
             state="disabled", command=self.run_merge_thread,
         )
@@ -155,7 +155,7 @@ class ROMergerApp(ctk.CTk):
 
     def _build_status_bar(self):
         self.status_label = ctk.CTkLabel(
-            self, text="Ready. Upar se file upload karke shuru karo.",
+            self, text="Ready. Upload a file above to get started.",
             font=FONT_BODY, text_color="#444", anchor="w",
         )
         self.status_label.pack(fill="x", padx=30, pady=(0, 8))
@@ -208,13 +208,13 @@ class ROMergerApp(ctk.CTk):
     # ------------------------------------------------------------- ACTIONS
     def upload_file(self):
         path = filedialog.askopenfilename(
-            title="Excel file chuno",
+            title="Select Excel file",
             filetypes=[("Excel files", "*.xlsx *.xls")],
         )
         if not path:
             return
         try:
-            self.status_label.configure(text="File load ho rahi hai...")
+            self.status_label.configure(text="Loading file...")
             self.update_idletasks()
             self.source_df = pd.read_excel(path, sheet_name=0)
             self.file_path = path
@@ -222,13 +222,13 @@ class ROMergerApp(ctk.CTk):
             self.merge_btn.configure(state="normal")
             self.export_btn.configure(state="disabled")
             self.status_label.configure(
-                text=f"File load ho gayi ✅  ({len(self.source_df)} rows). "
-                     f"Ab 'Merge Karo' dabao."
+                text=f"File loaded ✅  ({len(self.source_df)} rows). "
+                     f"Click 'Merge' to continue."
             )
             self._populate_table(self.source_df.head(50), "Original Data (preview - top 50 rows)")
         except Exception as e:
-            messagebox.showerror("Error", f"File read nahi ho payi:\n{e}")
-            self.status_label.configure(text="File load fail ho gayi.")
+            messagebox.showerror("Error", f"Could not read file:\n{e}")
+            self.status_label.configure(text="File load failed.")
 
     def run_merge_thread(self):
         self.merge_btn.configure(state="disabled")
@@ -253,13 +253,13 @@ class ROMergerApp(ctk.CTk):
         self.merge_btn.configure(state="normal")
 
         if error:
-            messagebox.showerror("Error", f"Merge me problem aayi:\n{error}")
-            self.status_label.configure(text="Merge fail ho gaya.")
+            messagebox.showerror("Error", f"Something went wrong during merge:\n{error}")
+            self.status_label.configure(text="Merge failed.")
             return
 
         self.export_btn.configure(state="normal")
         self.status_label.configure(
-            text=f"Merge ho gaya ✅  {len(self.source_df)} rows → "
+            text=f"Merge complete ✅  {len(self.source_df)} rows → "
                  f"{len(self.merged_df)} unique RO Codes."
         )
         self._populate_table(self.merged_df, "Merged Report (preview)")
@@ -269,7 +269,7 @@ class ROMergerApp(ctk.CTk):
             return
         default_name = "merged_report.xlsx"
         path = filedialog.asksaveasfilename(
-            title="Merged report save karo",
+            title="Save merged report",
             defaultextension=".xlsx",
             initialfile=default_name,
             filetypes=[("Excel files", "*.xlsx")],
@@ -278,10 +278,10 @@ class ROMergerApp(ctk.CTk):
             return
         try:
             self.merged_df.to_excel(path, index=False, sheet_name="Merged Report")
-            self.status_label.configure(text=f"Report save ho gayi ✅  → {path}")
-            messagebox.showinfo("Saved", f"Merged report save ho gayi:\n{path}")
+            self.status_label.configure(text=f"Report saved ✅  → {path}")
+            messagebox.showinfo("Saved", f"Merged report saved successfully:\n{path}")
         except Exception as e:
-            messagebox.showerror("Error", f"Save nahi ho paya:\n{e}")
+            messagebox.showerror("Error", f"Could not save file:\n{e}")
 
     def _populate_table(self, df: pd.DataFrame, title: str):
         self.table_title.configure(text=title)
