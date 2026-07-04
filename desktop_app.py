@@ -66,6 +66,7 @@ SAME_COLUMNS = [
 DIFFERENT_COLUMNS = [
     "Ticket No", "Ageing Days", "Device", "Device Details",
     "Current Dependency", "Automation Vendor Comments", "HPCL Comments",
+    "Status",
 ]
 
 # Engineer mapping (from an optional RO Master file) — flexible column names,
