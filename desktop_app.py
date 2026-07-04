@@ -68,6 +68,17 @@ DIFFERENT_COLUMNS = [
     "Current Dependency", "Automation Vendor Comments", "HPCL Comments",
 ]
 
+# Engineer mapping (from an optional RO Master file) — flexible column names,
+# since different exports may label these slightly differently.
+MASTER_RO_CODE_CANDIDATES = ["roCode", "RO Code", "RO_Code", "ro code"]
+MASTER_ENGINEER_CANDIDATES = ["engineer", "Engineer", "Engineer Name", "EngineerName"]
+
+# Where the last-uploaded Engineer Mapping is remembered, so the user
+# doesn't have to re-upload it every time the app is opened.
+PERSIST_DIR = os.path.join(os.path.expanduser("~"), ".ro_code_merger")
+PERSIST_MAPPING_PATH = os.path.join(PERSIST_DIR, "engineer_mapping.csv")
+PERSIST_META_PATH = os.path.join(PERSIST_DIR, "engineer_mapping_meta.txt")
+
 # ---------------------------------------------------------------------------
 # CONFIG — visual design system
 # ---------------------------------------------------------------------------
@@ -112,8 +123,80 @@ F_SIDEBAR_DESC  = ("Segoe UI", 10)
 # ---------------------------------------------------------------------------
 # Business logic
 # ---------------------------------------------------------------------------
-def merge_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Merges duplicate RO Code rows into a single row."""
+def find_column(df: pd.DataFrame, candidates: list):
+    """Case-insensitive, whitespace-tolerant column lookup."""
+    lower_map = {str(c).strip().lower(): c for c in df.columns}
+    for cand in candidates:
+        key = cand.strip().lower()
+        if key in lower_map:
+            return lower_map[key]
+    return None
+
+
+def build_engineer_lookup(master_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalizes an RO Master file into a clean 2-column lookup table:
+    RO Code -> Engineer. Raises ValueError with a clear message if the
+    expected columns can't be found.
+    """
+    ro_col = find_column(master_df, MASTER_RO_CODE_CANDIDATES)
+    eng_col = find_column(master_df, MASTER_ENGINEER_CANDIDATES)
+
+    if ro_col is None or eng_col is None:
+        raise ValueError(
+            "Could not find an RO Code / Engineer column in the mapping file. "
+            f"Columns found: {', '.join(map(str, master_df.columns))}"
+        )
+
+    lookup = master_df[[ro_col, eng_col]].copy()
+    lookup.columns = ["RO Code", "Engineer"]
+    lookup["RO Code"] = lookup["RO Code"].astype(str).str.strip()
+    lookup["Engineer"] = lookup["Engineer"].astype(str).str.strip()
+    lookup = lookup.drop_duplicates(subset="RO Code", keep="first")
+    return lookup
+
+
+def save_engineer_mapping(lookup: pd.DataFrame, source_name: str):
+    """Persists the Engineer lookup table to disk so it survives app restarts."""
+    os.makedirs(PERSIST_DIR, exist_ok=True)
+    lookup.to_csv(PERSIST_MAPPING_PATH, index=False)
+    import datetime
+    with open(PERSIST_META_PATH, "w", encoding="utf-8") as f:
+        f.write(f"{source_name}\n{datetime.datetime.now().strftime('%d %b %Y, %I:%M %p')}")
+
+
+def load_persisted_engineer_mapping():
+    """Returns (lookup_df, source_name, saved_when) if a saved mapping exists, else None."""
+    if not os.path.exists(PERSIST_MAPPING_PATH):
+        return None
+    try:
+        lookup = pd.read_csv(PERSIST_MAPPING_PATH, dtype=str)
+        source_name, saved_when = "a previous upload", ""
+        if os.path.exists(PERSIST_META_PATH):
+            with open(PERSIST_META_PATH, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+                if len(lines) >= 1:
+                    source_name = lines[0]
+                if len(lines) >= 2:
+                    saved_when = lines[1]
+        return lookup, source_name, saved_when
+    except Exception:
+        return None
+
+
+def clear_persisted_engineer_mapping():
+    for p in (PERSIST_MAPPING_PATH, PERSIST_META_PATH):
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+        except Exception:
+            pass
+
+
+
+def merge_dataframe(df: pd.DataFrame, engineer_lookup: pd.DataFrame = None) -> pd.DataFrame:
+    """Merges duplicate RO Code rows into a single row, optionally attaching
+    an Engineer name from an RO Master lookup table."""
     if GROUP_KEY not in df.columns:
         raise ValueError(f"'{GROUP_KEY}' column not found in the sheet.")
 
@@ -137,7 +220,27 @@ def merge_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index(drop=True)
     )
     final_cols = [GROUP_KEY] + same_cols + diff_cols + ["Ticket Count"]
-    return merged[final_cols]
+    merged = merged[final_cols]
+
+    if engineer_lookup is not None:
+        merged["_RO Code Key"] = merged[GROUP_KEY].astype(str).str.strip()
+        merged = merged.merge(
+            engineer_lookup, left_on="_RO Code Key", right_on="RO Code",
+            how="left", suffixes=("", "_lookup"),
+        )
+        merged["Engineer"] = merged["Engineer"].fillna("Not Mapped")
+        merged = merged.drop(columns=["_RO Code Key"])
+        if "RO Code_lookup" in merged.columns:
+            merged = merged.drop(columns=["RO Code_lookup"])
+        # Place Engineer right after RO Name (or RO Code if RO Name absent)
+        cols = list(merged.columns)
+        cols.remove("Engineer")
+        anchor_col = "RO Name" if "RO Name" in cols else GROUP_KEY
+        insert_at = cols.index(anchor_col) + 1
+        cols.insert(insert_at, "Engineer")
+        merged = merged[cols]
+
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +328,9 @@ class ROMergerApp(ctk.CTk):
         self.source_df = None
         self.merged_df = None
         self.file_path = None
+        self.master_df = None
+        self.master_path = None
+        self.engineer_lookup = None
 
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -232,6 +338,7 @@ class ROMergerApp(ctk.CTk):
         self._build_sidebar()
         self._build_main_area()
         self._set_step("upload")
+        self._auto_load_persisted_mapping()
 
     def _set_app_icon(self):
         """Sets the window/taskbar icon (icon.ico) if it's available."""
@@ -350,8 +457,37 @@ class ROMergerApp(ctk.CTk):
         )
         self.file_label.grid(row=1, column=0, columnspan=3, sticky="w", padx=22, pady=(0, 16))
 
+        # -- Optional: RO Master / Engineer mapping file
+        master_row = ctk.CTkFrame(card, fg_color=COLOR["row_alt"], corner_radius=8)
+        master_row.grid(row=2, column=0, columnspan=3, sticky="ew", padx=20, pady=(0, 16))
+        master_row.grid_columnconfigure(1, weight=1)
+
+        self.master_btn = ctk.CTkButton(
+            master_row, text="👤   Upload Engineer Mapping (optional)", font=F_BODY_SM,
+            fg_color="transparent", text_color=COLOR["chip_blue_fg"],
+            hover_color="#E4E9F2", corner_radius=6, height=34,
+            border_width=1, border_color=COLOR["border"],
+            command=self.upload_master_file, anchor="w",
+        )
+        self.master_btn.grid(row=0, column=0, sticky="w", padx=10, pady=8)
+
+        self.master_label = ctk.CTkLabel(
+            master_row, text="No RO Master file loaded — Engineer column will be skipped",
+            font=F_BODY_SM, text_color=COLOR["text_faint"], anchor="w",
+        )
+        self.master_label.grid(row=0, column=1, sticky="w", padx=(4, 10))
+
+        self.master_clear_btn = ctk.CTkButton(
+            master_row, text="✕", font=F_BODY_SM, width=28, height=28,
+            fg_color="transparent", text_color=COLOR["text_faint"],
+            hover_color="#E4E9F2", corner_radius=6,
+            command=self.clear_master_file,
+        )
+        self.master_clear_btn.grid(row=0, column=2, sticky="e", padx=10)
+        self.master_clear_btn.grid_remove()
+
         btn_row = ctk.CTkFrame(card, fg_color="transparent")
-        btn_row.grid(row=2, column=0, columnspan=3, sticky="ew", padx=20, pady=(0, 20))
+        btn_row.grid(row=3, column=0, columnspan=3, sticky="ew", padx=20, pady=(0, 20))
 
         self.merge_btn = ctk.CTkButton(
             btn_row, text="🔀   Merge Duplicates", font=F_BUTTON,
@@ -387,14 +523,17 @@ class ROMergerApp(ctk.CTk):
 
         self.stats_row = ctk.CTkFrame(main, fg_color="transparent")
         self.stats_row.grid(row=2, column=0, sticky="ew", padx=32, pady=(0, 6))
-        self.stats_row.grid_columnconfigure((0, 1, 2), weight=1, uniform="stats")
+        self.stats_row.grid_columnconfigure((0, 1, 2, 3), weight=1, uniform="stats")
 
         self.stat_total = StatCard(self.stats_row, "Total Ticket Rows", *self._chip("blue"))
         self.stat_unique = StatCard(self.stats_row, "Unique RO Codes", *self._chip("green"))
         self.stat_merged = StatCard(self.stats_row, "Rows Consolidated", *self._chip("amber"))
+        self.stat_engineers = StatCard(self.stats_row, "Engineers Mapped", *self._chip("blue"))
         self.stat_total.grid(row=0, column=0, sticky="ew", padx=(0, 8))
         self.stat_unique.grid(row=0, column=1, sticky="ew", padx=8)
-        self.stat_merged.grid(row=0, column=2, sticky="ew", padx=(8, 0))
+        self.stat_merged.grid(row=0, column=2, sticky="ew", padx=8)
+        self.stat_engineers.grid(row=0, column=3, sticky="ew", padx=(8, 0))
+        self.stat_engineers.grid_remove()
         self.stats_row.grid_remove()
 
         table_card = ctk.CTkFrame(
@@ -500,17 +639,74 @@ class ROMergerApp(ctk.CTk):
             messagebox.showerror("Error", f"Could not read file:\n{e}")
             self.status_label.configure(text="File load failed", text_color=COLOR["danger"])
 
+    def _auto_load_persisted_mapping(self):
+        """On startup, silently reloads the last Engineer Mapping file, if any."""
+        result = load_persisted_engineer_mapping()
+        if result is None:
+            return
+        lookup, source_name, saved_when = result
+        self.engineer_lookup = lookup
+        when_txt = f"   ·   saved {saved_when}" if saved_when else ""
+        self.master_label.configure(
+            text=f"👤  {source_name}   ·   {len(lookup)} engineers mapped{when_txt}",
+            text_color=COLOR["text_muted"],
+        )
+        self.master_clear_btn.grid()
+
+    def upload_master_file(self):
+        path = filedialog.askopenfilename(
+            title="Select RO Master / Engineer mapping file",
+            filetypes=[("Excel or CSV files", "*.xlsx *.xls *.csv")],
+        )
+        if not path:
+            return
+        try:
+            self.master_label.configure(text="Loading mapping file…", text_color=COLOR["text_faint"])
+            self.update_idletasks()
+            if path.lower().endswith(".csv"):
+                master_df = pd.read_csv(path)
+            else:
+                master_df = pd.read_excel(path, sheet_name=0)
+
+            lookup = build_engineer_lookup(master_df)  # validates columns early
+
+            self.master_df = master_df
+            self.master_path = path
+            self.engineer_lookup = lookup
+            save_engineer_mapping(lookup, os.path.basename(path))
+            self.master_label.configure(
+                text=f"👤  {os.path.basename(path)}   ·   {len(lookup)} engineers mapped   ·   saved for next time",
+                text_color=COLOR["text_muted"],
+            )
+            self.master_clear_btn.grid()
+        except Exception as e:
+            self.engineer_lookup = None
+            self.master_label.configure(
+                text=f"Could not load mapping file: {e}", text_color=COLOR["danger"],
+            )
+
+    def clear_master_file(self):
+        self.master_df = None
+        self.master_path = None
+        self.engineer_lookup = None
+        clear_persisted_engineer_mapping()
+        self.master_label.configure(
+            text="No RO Master file loaded — Engineer column will be skipped",
+            text_color=COLOR["text_faint"],
+        )
+        self.master_clear_btn.grid_remove()
+
     def run_merge_thread(self):
         self.merge_btn.configure(state="disabled")
         self.dropzone.configure(state="disabled")
         self.status_label.configure(text="Merging…", text_color=COLOR["text_faint"])
-        self.progress.grid(row=3, column=0, columnspan=3, sticky="ew", padx=20, pady=(0, 4))
+        self.progress.grid(row=4, column=0, columnspan=3, sticky="ew", padx=20, pady=(0, 4))
         self.progress.start()
         threading.Thread(target=self._do_merge, daemon=True).start()
 
     def _do_merge(self):
         try:
-            merged = merge_dataframe(self.source_df)
+            merged = merge_dataframe(self.source_df, engineer_lookup=self.engineer_lookup)
             self.merged_df = merged
             self.after(0, self._on_merge_done, None)
         except Exception as e:
@@ -536,6 +732,14 @@ class ROMergerApp(ctk.CTk):
         self.stat_total.set_value(total)
         self.stat_unique.set_value(unique)
         self.stat_merged.set_value(total - unique)
+
+        if "Engineer" in self.merged_df.columns:
+            mapped = int((self.merged_df["Engineer"] != "Not Mapped").sum())
+            self.stat_engineers.set_value(f"{mapped} / {unique}")
+            self.stat_engineers.grid()
+        else:
+            self.stat_engineers.grid_remove()
+
         self.stats_row.grid()
 
         self.table_subtitle.configure(text=f"Merged report — {unique} rows")
@@ -569,6 +773,7 @@ class ROMergerApp(ctk.CTk):
         self.merge_btn.configure(state="disabled")
         self.export_btn.configure(state="disabled")
         self.status_label.configure(text="Ready", text_color=COLOR["text_faint"])
+        self.stat_engineers.grid_remove()
         self.stats_row.grid_remove()
         self.table_title.configure(text="Preview")
         self.table_subtitle.configure(text="Upload a file to see data here")
